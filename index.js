@@ -17,6 +17,7 @@ const requiredEnvVars = [
   "SLACK_BOT_TOKEN",
   "POSTGRES_URL",
   "REVIEW_CHANNEL_ID",
+  "HASH_SALT",
   ...(useSocketMode ? ["SLACK_APP_TOKEN"] : []),
 ];
 let missingVars = [];
@@ -67,7 +68,7 @@ async function initDatabase() {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS messages (
         id SERIAL PRIMARY KEY,
-        user_hash VARCHAR(32) NOT NULL,
+        user_hash VARCHAR(64) NOT NULL,
         message TEXT NOT NULL,
         status VARCHAR(20) DEFAULT 'pending',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -99,6 +100,16 @@ if (useSocketMode) {
 }
 const app = new App(appConfig);
 
+const showHashedUser = process.env.SHOW_PARTIAL_HASH_IN_REVIEW === "true";
+
+// hashes user id with salt
+function hashUserId(userId) {
+  return crypto
+    .createHash("sha256")
+    .update(userId + process.env.HASH_SALT)
+    .digest("hex");
+}
+
 async function sendToReviewChannel(message, hashedUser, messageId) {
   const result = await app.client.chat.postMessage({
     token: process.env.SLACK_BOT_TOKEN,
@@ -112,10 +123,9 @@ async function sendToReviewChannel(message, hashedUser, messageId) {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `*Pending Impression*\nFrom: \`${hashedUser.substring(
-            0,
-            8
-          )}...\`\n\n>${message}`,
+          text: `*Pending Impression*\n${
+            showHashedUser ? `From: \`${hashedUser.substring(0, 8)}...\`\n` : ""
+          }>${message}`,
         },
       },
       {
@@ -272,17 +282,13 @@ app.action("deny_impression", async ({ ack, body, client }) => {
   console.log("⚡️ Bolt app is running!");
 })();
 
+let adminsJson = require("./admins.json");
+
 // delete shortcut for admins
 app.shortcut("delete_me", async ({ ack, body, say }) => {
   ack();
   if (
-    [
-      "UJYDFQ2QL",
-      "UHFEGV147",
-      "U01D6FYHLUW",
-      "UM4BAKT6U",
-      "U0128N09Q8Y",
-    ].includes(body.user.id)
+    adminsJson.admins.includes(body.user.id)
   ) {
     await app.client.chat.delete({
       token: process.env.SLACK_BOT_TOKEN,
@@ -322,7 +328,7 @@ app.shortcut("reply_impression", async ({ ack, body, say }) => {
 
   // if reply not in honest impressions channel, disallow
   if (
-    !["C02A6BRM2JD", "G01PPVD14Q0", "C08TS367V2T"].includes(body.channel.id) &&
+    !["C02A6BRM2JD", "G01PPVD14Q0"].includes(body.channel.id) &&
     !(process.env.HONEST_IMPRESSIONS_CHANNEL_ID === body.channel.id) &&
     !["UJYDFQ2QL"].includes(body.user.id)
   ) {
@@ -372,7 +378,7 @@ app.view("impression_id", async ({ ack, body, view, client }) => {
   // avoid timeout
   await ack();
 
-  const userHash = crypto.createHash("md5").update(body.user.id).digest("hex");
+  const userHash = hashUserId(body.user.id);
   const message = view.state.values.input_c.dreamy_input.value;
   const [threadTs, channelId] = view.private_metadata.split("|");
 
